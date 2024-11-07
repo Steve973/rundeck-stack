@@ -1,0 +1,120 @@
+services:
+  traefik:
+    image: traefik:v3.1
+    container_name: rundeck_proxy_traefik
+    networks:
+      - rundeck_network
+    ports:
+      - "8888:8888"
+      - "443:4440"
+    volumes:
+      - "./traefik/traefik-dynamic-config.yml:/etc/traefik/dynamic/traefik-dynamic-config.yml:ro"
+      - "./traefik/credentials.txt:/etc/traefik/credentials.txt:ro"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./certs:/certs:ro"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.entrypoints=dashboard"
+      - "traefik.http.routers.dashboard.rule=PathPrefix(`/api`) || PathPrefix(`/dashboard`)"
+      - "traefik.http.routers.dashboard.tls=true"
+      - "traefik.http.routers.dashboard.tls.options=default"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      - "traefik.http.routers.dashboard.middlewares=dashboard-auth"
+      - "traefik.http.middlewares.dashboard-auth.basicauth.usersfile=/etc/traefik/credentials.txt"
+    command:
+      - "--global.checkNewVersion=false"
+      - "--global.sendAnonymousUsage=false"
+      - "--accesslog=true"
+      - "--accesslog.fields.defaultmode=keep"
+      - "--accesslog.fields.headers.defaultmode=keep"
+      - "--log.level=WARN"
+      - "--api.dashboard=true"
+      - "--ping=true"
+      - "--entrypoints.dashboard.address=:8888"
+      - "--entrypoints.websecure.address=:4440"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedByDefault=false"
+      - "--providers.docker.network=rundeck_network"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/ping"]
+      start_period: 15s
+      interval: 60s
+      timeout: 15s
+      retries: 3
+    depends_on:
+      rundeck:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mariadb:
+    image: mariadb:11.5
+    container_name: rundeck_database_mariadb
+    networks:
+      - rundeck_network
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: rundeckdb
+      MYSQL_USER: rundeckuser
+      MYSQL_PASSWORD: rundeckpassword
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 15s
+      interval: 60s
+      timeout: 15s
+      retries: 3
+    restart: unless-stopped
+
+  rundeck:
+    image: rundeck/rundeck:5.7.0
+    container_name: rundeck_server
+    networks:
+      - rundeck_network
+    volumes:
+      - rundeck-data:/home/rundeck/server/data
+    environment:
+      RUNDECK_GRAILS_URL: https://rundeck/rundeck
+      RUNDECK_SERVER_CONTEXTPATH: /rundeck
+      RUNDECK_SERVER_FORWARDED: true
+      RUNDECK_SERVER_ADDRESS: 0.0.0.0
+      RUNDECK_DATABASE_DRIVER: org.mariadb.jdbc.Driver
+      RUNDECK_DATABASE_USERNAME: rundeckuser
+      RUNDECK_DATABASE_PASSWORD: rundeckpassword
+      RUNDECK_DATABASE_URL: jdbc:mysql://mariadb/rundeckdb?autoReconnect=true&useSSL=false
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.rundeck.rule=PathPrefix(`/rundeck`)"
+      - "traefik.http.routers.rundeck.entrypoints=websecure"
+      - "traefik.http.routers.rundeck.tls=true"
+      - "traefik.http.services.rundeck.loadbalancer.server.port=4440"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4440/rundeck"]
+      start_period: 60s
+      interval: 60s
+      timeout: 15s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  mariadb-data:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./data/mariadb
+      o: bind
+  rundeck-data:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./data/rundeck
+      o: bind
+
+networks:
+  rundeck_network:
+    name: rundeck_network
+    driver: bridge
